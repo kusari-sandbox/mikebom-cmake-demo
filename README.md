@@ -141,34 +141,21 @@ Notice:
 - `libSystem.B.dylib` is the macOS C runtime, detected via
   dynamic-linkage analysis of the Mach-O `LC_LOAD_DYLIB` entries.
 
-## Step 4 — Binary scan with the external fingerprint corpus (Linux)
+## Step 4 — Binary scan with the external fingerprint corpus
 
-The symbol-fingerprint matcher is currently ELF-only (milestone 099
-scope). On macOS, the static-embedded zlib lives in the Mach-O
-binary's symbol table but mikebom doesn't yet read Mach-O symbol
-tables — that's tracked as a follow-on. The full demo therefore
-needs a Linux ELF binary.
+The symbol-fingerprint matcher works natively on both ELF (Linux) AND
+Mach-O (macOS) as of mikebom `v0.1.0-alpha.44`. PE (Windows) is
+tracked as a follow-on (PE's `IMAGE_EXPORT_DIRECTORY` is a different
+shape from ELF's `.dynsym` / Mach-O's `LC_SYMTAB`).
 
-Build the binary in Docker:
-
-```bash
-docker run --rm -v "$(pwd)":/src -w /src ubuntu:24.04 bash -c '
-    apt-get update -qq
-    apt-get install -qq -y cmake ninja-build gcc git ca-certificates
-    rm -rf build-linux
-    cmake -S . -B build-linux -G Ninja
-    ninja -C build-linux
-'
-```
-
-Then scan the Linux binary with the external corpus opt-in:
+Scan the build directory with the external corpus opt-in:
 
 ```bash
 SCAN_DIR=$(mktemp -d)
-cp build-linux/crc-demo "$SCAN_DIR/"
+cp build/crc-demo "$SCAN_DIR/"
 mikebom sbom scan \
     --path "$SCAN_DIR" \
-    --output binary-linux.cdx.json \
+    --output binary-fp.cdx.json \
     --no-deep-hash \
     --fingerprints-corpus
 ```
@@ -176,7 +163,7 @@ mikebom sbom scan \
 Inspect the fingerprint match:
 
 ```bash
-jq '.components[] | select((.properties // [])[] | (.name == "mikebom:fingerprint-corpus-sha")) | {purl, name, corpus_sha: ([.properties[] | select(.name == "mikebom:fingerprint-corpus-sha") | .value][0]), symbols_matched: ([.properties[] | select(.name == "mikebom:fingerprint-symbols-matched") | .value][0])}' binary-linux.cdx.json
+jq '.components[] | select((.properties // [])[] | (.name == "mikebom:fingerprint-corpus-sha")) | {purl, name, corpus_sha: ([.properties[] | select(.name == "mikebom:fingerprint-corpus-sha") | .value][0]), symbols_matched: ([.properties[] | select(.name == "mikebom:fingerprint-symbols-matched") | .value][0])}' binary-fp.cdx.json
 ```
 
 ```json
@@ -192,7 +179,7 @@ What this is saying:
 
 - The matcher found a `pkg:generic/zlib` component in the
   `crc-demo` binary based on its exported-symbol fingerprint
-  (10 of 10 zlib API symbols present in `.dynsym`).
+  (10 of 10 zlib API symbols present in the dynamic-symbol table).
 - The fingerprint that produced the match came from corpus revision
   `fff39c6ad22c` of `kusari-sandbox/mikebom-fingerprints`.
 - A consumer can resolve that 12-hex prefix back to the exact
@@ -205,6 +192,18 @@ What this is saying:
   curl -fsSL https://github.com/kusari-sandbox/mikebom-fingerprints/archive/fff39c6ad22ce8420b506323ce1d5cce4b628d5c.tar.gz | tar xz -C /tmp
   jq '.' /tmp/mikebom-fingerprints-fff39c6ad22ce8420b506323ce1d5cce4b628d5c/corpus/zlib.json
   ```
+
+### macOS-specific implementation note
+
+mikebom's Mach-O extraction reads `LC_SYMTAB`'s external symbols
+(`N_EXT` flag set) and strips the leading `_` that the Mach-O C ABI
+prepends to every C symbol. The bundled C example here exports
+zlib's API because `set_target_properties(crc-demo PROPERTIES
+ENABLE_EXPORTS TRUE)` in `CMakeLists.txt` adds `-rdynamic` on Linux
++ enables the equivalent export-symbol behavior on macOS — real-
+world parallel: any binary that loads plugins via `dlopen()` does
+this, and those are the binaries the fingerprint matcher is most
+useful for.
 
 ## What this demo does NOT cover
 
@@ -238,14 +237,9 @@ mv /tmp/cmake-demo-build build
 # Step 3
 mikebom sbom scan --path build/ --output binary.cdx.json --no-deep-hash
 
-# Step 4 (Linux only — use Docker if you're on macOS / Windows)
-docker run --rm -v "$(pwd)":/src -w /src ubuntu:24.04 bash -c '
-    apt-get update -qq
-    apt-get install -qq -y cmake ninja-build gcc git ca-certificates
-    rm -rf build-linux && cmake -S . -B build-linux -G Ninja && ninja -C build-linux
-'
-SCAN_DIR=$(mktemp -d) && cp build-linux/crc-demo "$SCAN_DIR/"
-mikebom sbom scan --path "$SCAN_DIR" --output binary-linux.cdx.json --no-deep-hash --fingerprints-corpus
+# Step 4 (works natively on macOS + Linux as of mikebom v0.1.0-alpha.44)
+SCAN_DIR=$(mktemp -d) && cp build/crc-demo "$SCAN_DIR/"
+mikebom sbom scan --path "$SCAN_DIR" --output binary-fp.cdx.json --no-deep-hash --fingerprints-corpus
 ```
 
 ## License
