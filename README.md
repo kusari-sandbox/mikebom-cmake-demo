@@ -143,10 +143,18 @@ Notice:
 
 ## Step 4 — Binary scan with the external fingerprint corpus
 
-The symbol-fingerprint matcher works natively on both ELF (Linux) AND
-Mach-O (macOS) as of mikebom `v0.1.0-alpha.44`. PE (Windows) is
-tracked as a follow-on (PE's `IMAGE_EXPORT_DIRECTORY` is a different
-shape from ELF's `.dynsym` / Mach-O's `LC_SYMTAB`).
+The symbol-fingerprint matcher works natively across all three major
+binary formats — ELF (Linux), Mach-O (macOS, alpha.44), and PE
+(Windows, alpha.45+). Each format reaches a different table to find
+the exported symbols (`.dynsym` for ELF, `LC_SYMTAB` externals for
+Mach-O, `IMAGE_EXPORT_DIRECTORY` for PE), but the corpus content +
+matching threshold are identical across platforms.
+
+On Windows, the canonical fingerprint-matcher target is a DLL that
+re-exports a statically-embedded library's API (a wrapper DLL around
+zlib, openssl, etc.). Stripped Windows EXEs that use a library
+internally without re-exporting it have an empty export table — same
+shape limitation as the ELF/Mach-O scanners.
 
 Scan the build directory with the external corpus opt-in:
 
