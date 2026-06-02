@@ -1,0 +1,5 @@
+build/
+build-*/
+*.cdx.json
+*.spdx.json
+.DS_Store
