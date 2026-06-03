@@ -12,11 +12,17 @@ projects from BOTH ends of the build pipeline:
    identification via mikebom's external symbol-fingerprint corpus
    (the [`kusari-sandbox/mikebom-fingerprints`](https://github.com/kusari-sandbox/mikebom-fingerprints)
    sibling repo).
+3. **Cross-tier alignment** (alpha.45+) — when both scans run
+   together against the project root, the binary-tier fingerprint
+   match is automatically attributed to the source-tier PURL the
+   cmake reader emitted. ONE component per real library across the
+   whole SBOM, regardless of how many tiers identified it.
 
-The two scans answer complementary questions:
+The three combined answer three complementary questions:
 
 - "What does this project **say** it depends on?" → source scan.
 - "What does this binary **actually contain**?" → binary scan.
+- "Do the two stories agree?" → cross-tier alignment.
 
 ## Project shape
 
@@ -213,20 +219,86 @@ world parallel: any binary that loads plugins via `dlopen()` does
 this, and those are the binaries the fingerprint matcher is most
 useful for.
 
+## Step 5 — Cross-tier alignment: source + binary SBOMs equality-join (alpha.45+)
+
+Pre-milestone-109, the project-root scan emitted TWO zlib components
+under different PURLs — the source-tier `pkg:github/madler/zlib@v1.3.1`
+from the cmake reader AND the binary-tier `pkg:generic/zlib` from
+the symbol-fingerprint matcher. Consumers diffing source + binary
+SBOMs saw a phantom mismatch.
+
+As of mikebom `v0.1.0-alpha.45+`, scanning the project root with
+`--fingerprints-corpus` produces ONE zlib component carrying BOTH
+sources' evidence on a single source-tier PURL:
+
+```bash
+$ mikebom sbom scan --path . --output sbom.cdx.json --no-deep-hash --fingerprints-corpus
+$ jq '[.components[] | select(.name == "zlib")] | length' sbom.cdx.json
+1
+$ jq '.components[] | select(.name == "zlib") | {purl, properties: [.properties[] | {name, value}]}' sbom.cdx.json
+{
+  "purl": "pkg:github/madler/zlib@v1.3.1",
+  "properties": [
+    { "name": "mikebom:source-mechanism",            "value": "cmake-fetchcontent-git" },
+    { "name": "mikebom:fingerprint-corpus-sha",      "value": "fff39c6ad22c" },
+    { "name": "mikebom:fingerprint-symbols-matched", "value": "10/10" },
+    { "name": "mikebom:sbom-tier",                   "value": "source" }
+  ]
+}
+```
+
+The mechanism: when mikebom scans a cmake project root, it walks
+the build tree for `_deps/<name>-build/` directories (cmake's
+documented `FetchContent_Declare` output layout). When a fingerprint
+match's library name resolves against a cmake declaration that
+produced one of those build dirs, the binary-tier match's PURL is
+rewritten to the source-tier value. The downstream dedup pipeline
+then merges the two components by shared PURL into one final
+component carrying both sources' evidence.
+
+This means consumers can equality-join source-only and binary-tier
+SBOMs by PURL with no consumer-side fixup:
+
+```bash
+# CI pipeline: emit source-only SBOM at PR-merge time
+$ mikebom sbom scan --path src/ --output source.cdx.json --no-deep-hash
+
+# Release-build pipeline: emit binary SBOM at release time
+$ mikebom sbom scan --path . --output binary.cdx.json --no-deep-hash --fingerprints-corpus
+
+# Triage at vuln-scan time: which deps were declared but not linked?
+$ comm -23 \
+    <(jq -r '.components[].purl' source.cdx.json | sort) \
+    <(jq -r '.components[].purl' binary.cdx.json | sort)
+# (empty when everything declared was also linked; otherwise the
+# legitimate "declared but not linked" signal — pkg:github/curl/curl@... etc.)
+```
+
+See [milestone 109 spec](https://github.com/kusari-sandbox/mikebom/tree/main/specs/109-binary-source-purl-binding)
+for the full design + scope (cmake `FetchContent_Declare` only this
+milestone; `ExternalProject_Add` / Bazel / Meson tracked as
+follow-ons).
+
 ## What this demo does NOT cover
 
-- **Cross-tier binding** (source SBOM ↔ binary SBOM via
-  `--bind-to-source`): the source SBOM here doesn't yet carry the
-  per-component binding fingerprints that mikebom's milestone-072
-  binding requires. A follow-on extension could add a `mikebom trace
-  run` build-tier capture to bridge the source and image SBOMs.
+- **Cross-tier binding via `--bind-to-source`**: the milestone-072
+  `--bind-to-source` flag is a SEPARATE mechanism for binding image-
+  tier SBOMs (typically deb/rpm/apk) to source-tier SBOMs via
+  per-component binding fingerprints. This demo's milestone-109
+  source+binary alignment (Step 5 above) is a different mechanism
+  scoped to single-scan-tree cmake projects. A follow-on extension
+  could add `mikebom trace run` build-tier capture for full
+  cross-document binding.
 - **Air-gapped pre-fetch**: `mikebom fingerprints fetch` + tar +
   ship + offline scan is covered by the
   [milestone-108 quickstart](https://github.com/kusari-sandbox/mikebom/blob/main/specs/108-fingerprint-corpus/quickstart.md#scenario-2--air-gapped-operator-pre-fetches-the-corpus).
 - **vcpkg / Conan / CPM.cmake** dep declarations: the cmake reader
   supports all three (milestone 102-103). This demo uses
   `FetchContent` because it requires no external package-manager
-  setup; the lookup recipes for the others are analogous.
+  setup; the lookup recipes for the others are analogous. The
+  milestone-109 cross-tier attribution only applies to
+  `FetchContent_Declare` this release; vcpkg / Conan binding ships
+  in a follow-on milestone.
 
 ## Reproducing on a clean checkout
 
@@ -245,9 +317,14 @@ mv /tmp/cmake-demo-build build
 # Step 3
 mikebom sbom scan --path build/ --output binary.cdx.json --no-deep-hash
 
-# Step 4 (works natively on macOS + Linux as of mikebom v0.1.0-alpha.44)
+# Step 4 (works natively on macOS + Linux + Windows as of mikebom v0.1.0-alpha.45)
 SCAN_DIR=$(mktemp -d) && cp build/crc-demo "$SCAN_DIR/"
 mikebom sbom scan --path "$SCAN_DIR" --output binary-fp.cdx.json --no-deep-hash --fingerprints-corpus
+
+# Step 5 (cross-tier alignment: source + binary emit ONE component per real library)
+mikebom sbom scan --path . --output sbom.cdx.json --no-deep-hash --fingerprints-corpus
+jq '.components[] | select(.name == "zlib") | .purl' sbom.cdx.json
+# → "pkg:github/madler/zlib@v1.3.1" (ONE component, both sources' evidence merged)
 ```
 
 ## License
